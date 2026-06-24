@@ -190,3 +190,28 @@ async def get_full_news(
             detail="Failed to fetch news. Please try again later."
         )
 
+
+@router.get("/debug", response_model=Dict[str, Any])
+async def debug_news() -> Dict[str, Any]:
+    """
+    Diagnostic endpoint to inspect feed parsing status.
+
+    Returns per-feed parsing results (bozo, entries_count, sample_titles)
+    and a quick snapshot of the latest `get_news` output. Intended for
+    debugging deployments where feeds may be unreachable or filtered out.
+    """
+    try:
+        stats = rss_service.get_feed_stats(sample=5)
+        sample_news = rss_service.get_news(limit=5)
+        return {
+            "status": "success",
+            "feeds": stats,
+            "sample_news_count": len(sample_news),
+            "sample_news": sample_news,
+            "freshness_hours": rss_service.freshness_hours,
+        }
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {type(e).__name__} - {str(e)}")
+        raise HTTPException(status_code=500, detail="Debug failed")
+
+

@@ -197,7 +197,3 @@ Already configured in `vercel.json`.
 
 Refer to the main `README.md` for comprehensive documentation, examples, and troubleshooting guides.
 
----
-
-**Happy coding! 🚀**
-
