@@ -1,12 +1,13 @@
-"""Fetch fresh, strictly education-related news from RSS feeds."""
+"""Fetch recent AI, AI-education, and Indian education news from RSS feeds."""
 
 import calendar
 import logging
-import re
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
-from urllib.error import URLError
 import os
+import re
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.error import URLError
 
 import feedparser
 
@@ -14,22 +15,44 @@ import feedparser
 logger = logging.getLogger(__name__)
 
 
-# Queries are restricted to the last day at the source. The service also checks
-# every publication timestamp locally, so stale or undated stories cannot leak in.
+# The three feeds reflect the three supported content categories. Content is
+# still validated locally because a search feed can return unrelated stories.
 RSS_FEEDS: List[str] = [
+    (
+        "https://news.google.com/rss/search?"
+        "q=(artificial+intelligence+OR+generative+AI+OR+machine+learning)+when:1d"
+        "&hl=en-IN&gl=IN&ceid=IN:en"
+    ),
+    (
+        "https://news.google.com/rss/search?"
+        "q=(%22AI+in+education%22+OR+%22education+AI%22+OR+EdTech)+when:1d"
+        "&hl=en-IN&gl=IN&ceid=IN:en"
+    ),
     (
         "https://news.google.com/rss/search?"
         "q=India+(education+OR+schools+OR+universities)+when:1d"
         "&hl=en-IN&gl=IN&ceid=IN:en"
     ),
-    (
-        "https://news.google.com/rss/search?"
-        "q=India+(%22AI+in+education%22+OR+%22education+AI%22+OR+EdTech)+when:1d"
-        "&hl=en-IN&gl=IN&ceid=IN:en"
-    ),
 ]
 
-EDUCATION_TERMS = (
+AI_TERMS: Tuple[str, ...] = (
+    "ai",
+    "artificial intelligence",
+    "generative ai",
+    "genai",
+    "machine learning",
+    "large language model",
+    "large language models",
+    "llm",
+    "llms",
+    "chatgpt",
+    "openai",
+    "anthropic",
+    "gemini",
+    "copilot",
+)
+
+EDUCATION_TERMS: Tuple[str, ...] = (
     "education",
     "educational",
     "school",
@@ -49,24 +72,16 @@ EDUCATION_TERMS = (
     "curriculum",
     "learning",
     "edtech",
-    "higher ed",
     "higher education",
-    "k-12",
-    "k12",
     "academic",
     "academics",
     "scholarship",
     "scholarships",
+    "exam",
+    "exams",
 )
 
-AMBIGUOUS_EDUCATION_TERMS = ("school", "schools", "learning")
-NON_EDUCATION_PROFILE_PATTERNS = (
-    r"(?<!\w)built\s+(?:an?\s+)?(?:rs\.?\s*)?[\w\s-]*business(?!\w)",
-    r"(?<!\w)student\s+(?:founder|entrepreneur)(?!\w)",
-    r"(?<!\w)student.*(?<!\w)crore-a-month(?!\w)",
-)
-
-INDIA_TERMS = (
+INDIA_TERMS: Tuple[str, ...] = (
     "india",
     "indian",
     "andhra pradesh",
@@ -117,8 +132,6 @@ INDIA_TERMS = (
     "bhopal",
     "bhubaneswar",
     "kochi",
-    "dombivali",
-    "dombivli",
     "cbse",
     "icse",
     "ugc",
@@ -132,62 +145,54 @@ INDIA_TERMS = (
     "nta",
 )
 
+# Hardware-focused stories are outside this application's scope in every
+# category, including AI education and Indian education.
+HARDWARE_TERMS: Tuple[str, ...] = (
+    "chip",
+    "chips",
+    "chipset",
+    "semiconductor",
+    "semiconductors",
+    "gpu",
+    "gpus",
+    "processor",
+    "processors",
+    "data center",
+    "data centers",
+    "server",
+    "servers",
+    "smartphone",
+    "smartphones",
+    "laptop",
+    "laptops",
+    "robot",
+    "robots",
+    "robotics",
+    "device",
+    "devices",
+)
+
+NON_EDUCATION_PROFILE_PATTERNS: Tuple[str, ...] = (
+    r"(?<!\w)built\s+(?:an?\s+)?(?:rs\.?\s*)?[\w\s-]*business(?!\w)",
+    r"(?<!\w)student\s+(?:founder|entrepreneur)(?!\w)",
+    r"(?<!\w)student.*(?<!\w)crore-a-month(?!\w)",
+)
+
 
 class RSSService:
-    """Fetch, validate, deduplicate, and sort current education news."""
+    """Fetch, classify, deduplicate, and sort supported news stories."""
 
     def __init__(
         self,
         feeds: Optional[List[str]] = None,
         freshness_hours: int = 24,
     ):
-        """
-        Initialize RSSService.
-
-        Args:
-            feeds: optional list of feed URLs. Defaults to internal RSS_FEEDS.
-            freshness_hours: how far back (hours) to accept published items.
-
-        The service can be configured to restrict to India-only stories via the
-        environment variable `ONLY_INDIA`. By default `ONLY_INDIA` is `true`.
-        Set `ONLY_INDIA=false` in production to allow global news (useful for
-        debugging or broader coverage).
-        """
-        self.feeds = feeds or RSS_FEEDS
+        self.feeds = feeds or RSS_FEEDS.copy()
         self.freshness_hours = freshness_hours
-        only_india = os.getenv("ONLY_INDIA", "true").strip().lower()
-        self.only_india = only_india not in ("0", "false", "no", "off")
 
     @staticmethod
     def _normalize(value: str) -> str:
         return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value)).strip()
-
-    @classmethod
-    def _is_education_news(cls, entry: Any) -> bool:
-        text = cls._entry_text(entry)
-        if any(re.search(pattern, text) for pattern in NON_EDUCATION_PROFILE_PATTERNS):
-            return False
-        strong_terms = tuple(
-            term for term in EDUCATION_TERMS if term not in AMBIGUOUS_EDUCATION_TERMS
-        )
-        if cls._contains_term(text, strong_terms):
-            return True
-
-        # These words can be verbs or appear outside education. Require nearby
-        # education context instead of accepting them by themselves.
-        return bool(
-            re.search(
-                r"(?<!\w)(school|schools|learning)(?!\w).{0,50}"
-                r"(?<!\w)(student|teacher|classroom|education|curriculum|exam|learning)(?!\w)"
-                r"|(?<!\w)(student|teacher|classroom|education|curriculum|exam|learning)(?!\w)"
-                r".{0,50}(?<!\w)(school|schools|learning|Job|AI|Carrer)(?!\w)",
-                text,
-            )
-        )
-
-    @classmethod
-    def _is_india_news(cls, entry: Any) -> bool:
-        return cls._contains_term(cls._entry_text(entry), INDIA_TERMS)
 
     @classmethod
     def _entry_text(cls, entry: Any) -> str:
@@ -201,6 +206,9 @@ class RSSService:
             if hasattr(source, "get")
             else ""
         )
+
+        # Publisher names such as "India Education Diary" must not make an
+        # unrelated article appear relevant.
         if source_title:
             title = re.sub(
                 rf"\s*-\s*{re.escape(source_title)}\s*$",
@@ -217,11 +225,39 @@ class RSSService:
         return f" {title} {summary} ".lower()
 
     @staticmethod
-    def _contains_term(text: str, terms: tuple) -> bool:
+    def _contains_term(text: str, terms: Tuple[str, ...]) -> bool:
         return any(
             re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text)
             for term in terms
         )
+
+    @classmethod
+    def _category(cls, entry: Any) -> Optional[str]:
+        """Return the story category, or ``None`` when it is out of scope."""
+        text = cls._entry_text(entry)
+        has_ai = cls._contains_term(text, AI_TERMS)
+        has_education = cls._contains_term(text, EDUCATION_TERMS)
+        has_india = cls._contains_term(text, INDIA_TERMS)
+        has_hardware = cls._contains_term(text, HARDWARE_TERMS)
+
+        if any(re.search(pattern, text) for pattern in NON_EDUCATION_PROFILE_PATTERNS):
+            has_education = False
+
+        if has_hardware:
+            return None
+
+        # AI education is more specific than general AI, so classify it first.
+        if has_ai and has_education:
+            return "ai_education"
+
+        if has_ai:
+            return "ai"
+
+        # Indian education does not require an AI reference.
+        if has_india and has_education:
+            return "india_education"
+
+        return None
 
     @staticmethod
     def _published_at(entry: Any) -> Optional[datetime]:
@@ -235,7 +271,7 @@ class RSSService:
         limit: int = 10,
         now: Optional[datetime] = None,
     ) -> List[Dict[str, str]]:
-        """Return only education stories published during the freshness window."""
+        """Return recent stories from the three supported categories."""
         now = now or datetime.now(timezone.utc)
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
@@ -243,55 +279,61 @@ class RSSService:
 
         all_items: List[Dict[str, Any]] = []
         seen_titles = set()
+        rejection_counts: Counter = Counter()
         fetch_size = max(limit * 5, 50)
 
         for feed_url in self.feeds:
             try:
-                logger.info("Fetching education RSS feed: %s", feed_url)
-                # Allow an optional custom User-Agent to avoid blocking by some
-                # feed providers. Set the env var FEED_USER_AGENT if needed.
-                user_agent = os.getenv("FEED_USER_AGENT", None)
-                if user_agent:
-                    feed = feedparser.parse(feed_url, request_headers={"User-Agent": user_agent})
-                else:
-                    feed = feedparser.parse(feed_url)
+                logger.info("Fetching RSS feed: %s", feed_url)
+                user_agent = os.getenv("FEED_USER_AGENT")
+                headers = {"User-Agent": user_agent} if user_agent else {}
+                feed = feedparser.parse(feed_url, request_headers=headers)
+
                 if feed.bozo and isinstance(feed.bozo_exception, URLError):
-                    logger.warning("Failed to fetch %s: %s", feed_url, feed.bozo_exception)
+                    rejection_counts["feed_error"] += 1
+                    logger.warning(
+                        "Failed to fetch %s: %s", feed_url, feed.bozo_exception
+                    )
                     continue
 
                 for entry in feed.entries[:fetch_size]:
                     title = self._normalize(entry.get("title", ""))
+                    link = entry.get("link", "").strip()
                     published_at = self._published_at(entry)
                     normalized_title = title.casefold()
+                    category = self._category(entry)
 
-                    if (
-                        not title
-                        or not entry.get("link", "").strip()
-                        or normalized_title in seen_titles
-                        or not self._is_education_news(entry)
-                        or (self.only_india and not self._is_india_news(entry))
-                        or published_at is None
-                        or published_at < cutoff
-                        or published_at > now + timedelta(minutes=10)
-                    ):
-                        continue
-
-                    source = entry.get("source", {})
-                    source_title = (
-                        source.get("title", "").strip()
-                        if hasattr(source, "get")
-                        else ""
-                    )
-                    all_items.append(
-                        {
-                            "title": title,
-                            "link": entry.get("link", "").strip(),
-                            "published_at": published_at,
-                            "source": source_title,
-                        }
-                    )
-                    seen_titles.add(normalized_title)
+                    if not title or not link:
+                        rejection_counts["missing_title_or_link"] += 1
+                    elif normalized_title in seen_titles:
+                        rejection_counts["duplicate"] += 1
+                    elif category is None:
+                        rejection_counts["outside_supported_categories"] += 1
+                    elif published_at is None:
+                        rejection_counts["missing_date"] += 1
+                    elif published_at < cutoff:
+                        rejection_counts["stale"] += 1
+                    elif published_at > now + timedelta(minutes=10):
+                        rejection_counts["future_date"] += 1
+                    else:
+                        source = entry.get("source", {})
+                        source_title = (
+                            source.get("title", "").strip()
+                            if hasattr(source, "get")
+                            else ""
+                        )
+                        all_items.append(
+                            {
+                                "title": title,
+                                "link": link,
+                                "published_at": published_at,
+                                "source": source_title,
+                                "category": category,
+                            }
+                        )
+                        seen_titles.add(normalized_title)
             except Exception as exc:
+                rejection_counts["feed_error"] += 1
                 logger.error(
                     "Error fetching %s: %s - %s",
                     feed_url,
@@ -307,7 +349,13 @@ class RSSService:
             }
             for item in all_items[:limit]
         ]
-        logger.info("Returning %d fresh India education news items", len(result))
+        category_counts = Counter(item["category"] for item in result)
+        logger.info(
+            "RSS result accepted=%d categories=%s rejected=%s",
+            len(result),
+            dict(category_counts),
+            dict(rejection_counts),
+        )
         return result
 
     def add_feed(self, feed_url: str) -> None:
@@ -319,43 +367,28 @@ class RSSService:
             self.feeds.remove(feed_url)
 
     def get_feed_stats(self, sample: int = 5) -> List[Dict[str, Any]]:
-        """
-        Return diagnostic information about each configured feed.
-
-        Useful for debugging deploys where feeds may be unreachable or
-        returning unexpected content. For each feed this returns whether
-        feedparser reported a `bozo` (parse) error, the number of entries
-        discovered, and a small sample of titles.
-
-        Args:
-            sample: number of sample titles to include per feed.
-
-        Returns:
-            List of dicts with keys: feed, bozo, bozo_exception, entries_count, sample_titles
-        """
+        """Return bounded diagnostics for every configured feed."""
         stats: List[Dict[str, Any]] = []
         for feed_url in self.feeds:
             try:
-                logger.info("Parsing feed for diagnostics: %s", feed_url)
-                user_agent = os.getenv("FEED_USER_AGENT", None)
-                if user_agent:
-                    feed = feedparser.parse(feed_url, request_headers={"User-Agent": user_agent})
-                else:
-                    feed = feedparser.parse(feed_url)
-                bozo = bool(getattr(feed, "bozo", False))
-                bozo_exc = getattr(feed, "bozo_exception", None)
+                user_agent = os.getenv("FEED_USER_AGENT")
+                headers = {"User-Agent": user_agent} if user_agent else {}
+                feed = feedparser.parse(feed_url, request_headers=headers)
                 entries = getattr(feed, "entries", []) or []
-                sample_titles = []
-                for entry in entries[:sample]:
-                    title = self._normalize(entry.get("title", ""))
-                    sample_titles.append(title)
                 stats.append(
                     {
                         "feed": feed_url,
-                        "bozo": bozo,
-                        "bozo_exception": repr(bozo_exc) if bozo_exc else None,
+                        "bozo": bool(getattr(feed, "bozo", False)),
+                        "bozo_exception": (
+                            repr(getattr(feed, "bozo_exception", None))
+                            if getattr(feed, "bozo_exception", None)
+                            else None
+                        ),
                         "entries_count": len(entries),
-                        "sample_titles": sample_titles,
+                        "sample_titles": [
+                            self._normalize(entry.get("title", ""))
+                            for entry in entries[:sample]
+                        ],
                     }
                 )
             except Exception as exc:

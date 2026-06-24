@@ -106,6 +106,7 @@ async def get_news(
                     "link": item["link"],
                     "published_at": item["published_at"],
                     "source": item["source"],
+                    "category": item["category"],
                 }
                 for headline, item in zip(shortened_headlines, news_items)
             ],
