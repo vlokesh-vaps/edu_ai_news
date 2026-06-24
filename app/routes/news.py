@@ -4,6 +4,7 @@ News routes module for edu-news-ticker.
 Defines API endpoints for fetching shortened news headlines.
 """
 
+import asyncio
 import logging
 from typing import Dict, Any, List
 
@@ -72,7 +73,7 @@ async def get_news(
         logger.info(f"Fetching {limit} news items")
         
         # Fetch news from RSS feeds
-        news_items = rss_service.get_news(limit=limit)
+        news_items = await rss_service.get_news(limit=limit)
         
         if not news_items:
             logger.warning("No news items fetched from RSS feeds")
@@ -164,7 +165,7 @@ async def get_full_news(
         logger.info(f"Fetching {limit} full news items")
         
         # Fetch news from RSS feeds
-        news_items = rss_service.get_news(limit=limit)
+        news_items = await rss_service.get_news(limit=limit)
         
         if not news_items:
             logger.warning("No news items fetched from RSS feeds")
@@ -202,8 +203,10 @@ async def debug_news() -> Dict[str, Any]:
     debugging deployments where feeds may be unreachable or filtered out.
     """
     try:
-        stats = rss_service.get_feed_stats(sample=5)
-        sample_news = rss_service.get_news(limit=5)
+        stats, sample_news = await asyncio.gather(
+            rss_service.get_feed_stats(sample=5),
+            rss_service.get_news(limit=5),
+        )
         return {
             "status": "success",
             "feeds": stats,

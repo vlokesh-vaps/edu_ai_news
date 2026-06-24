@@ -1,15 +1,16 @@
 """Fetch recent AI, AI-education, and Indian education news from RSS feeds."""
 
 import calendar
+import asyncio
 import logging
 import os
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.error import URLError
 
 import feedparser
+import httpx
 
 
 logger = logging.getLogger(__name__)
@@ -266,7 +267,17 @@ class RSSService:
             return None
         return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
 
-    def get_news(
+    async def _fetch_feed(
+        self,
+        client: httpx.AsyncClient,
+        feed_url: str,
+    ) -> Any:
+        """Download and parse one RSS feed."""
+        response = await client.get(feed_url)
+        response.raise_for_status()
+        return feedparser.parse(response.content)
+
+    async def get_news(
         self,
         limit: int = 10,
         now: Optional[datetime] = None,
@@ -282,20 +293,35 @@ class RSSService:
         rejection_counts: Counter = Counter()
         fetch_size = max(limit * 5, 50)
 
-        for feed_url in self.feeds:
+        timeout = httpx.Timeout(10.0, connect=5.0)
+        user_agent = os.getenv(
+            "FEED_USER_AGENT",
+            "edu-ai-news/1.0 (+RSS reader)",
+        )
+
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers={"User-Agent": user_agent},
+        ) as client:
+            feed_results = await asyncio.gather(
+                *(self._fetch_feed(client, feed_url) for feed_url in self.feeds),
+                return_exceptions=True,
+            )
+
+        for feed_url, feed_result in zip(self.feeds, feed_results):
+            if isinstance(feed_result, BaseException):
+                rejection_counts["feed_error"] += 1
+                logger.error(
+                    "Error fetching %s: %s - %s",
+                    feed_url,
+                    type(feed_result).__name__,
+                    feed_result,
+                )
+                continue
+
+            feed = feed_result
             try:
-                logger.info("Fetching RSS feed: %s", feed_url)
-                user_agent = os.getenv("FEED_USER_AGENT")
-                headers = {"User-Agent": user_agent} if user_agent else {}
-                feed = feedparser.parse(feed_url, request_headers=headers)
-
-                if feed.bozo and isinstance(feed.bozo_exception, URLError):
-                    rejection_counts["feed_error"] += 1
-                    logger.warning(
-                        "Failed to fetch %s: %s", feed_url, feed.bozo_exception
-                    )
-                    continue
-
                 for entry in feed.entries[:fetch_size]:
                     title = self._normalize(entry.get("title", ""))
                     link = entry.get("link", "").strip()
@@ -366,14 +392,45 @@ class RSSService:
         if feed_url in self.feeds:
             self.feeds.remove(feed_url)
 
-    def get_feed_stats(self, sample: int = 5) -> List[Dict[str, Any]]:
+    async def get_feed_stats(self, sample: int = 5) -> List[Dict[str, Any]]:
         """Return bounded diagnostics for every configured feed."""
         stats: List[Dict[str, Any]] = []
-        for feed_url in self.feeds:
+        timeout = httpx.Timeout(10.0, connect=5.0)
+        user_agent = os.getenv(
+            "FEED_USER_AGENT",
+            "edu-ai-news/1.0 (+RSS reader)",
+        )
+
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers={"User-Agent": user_agent},
+        ) as client:
+            feed_results = await asyncio.gather(
+                *(self._fetch_feed(client, feed_url) for feed_url in self.feeds),
+                return_exceptions=True,
+            )
+
+        for feed_url, feed_result in zip(self.feeds, feed_results):
+            if isinstance(feed_result, BaseException):
+                logger.error(
+                    "Error parsing feed %s: %s", feed_url, feed_result
+                )
+                stats.append(
+                    {
+                        "feed": feed_url,
+                        "bozo": True,
+                        "bozo_exception": (
+                            f"{type(feed_result).__name__}: {feed_result}"
+                        ),
+                        "entries_count": 0,
+                        "sample_titles": [],
+                    }
+                )
+                continue
+
+            feed = feed_result
             try:
-                user_agent = os.getenv("FEED_USER_AGENT")
-                headers = {"User-Agent": user_agent} if user_agent else {}
-                feed = feedparser.parse(feed_url, request_headers=headers)
                 entries = getattr(feed, "entries", []) or []
                 stats.append(
                     {

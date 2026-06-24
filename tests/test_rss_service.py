@@ -5,11 +5,11 @@ from unittest.mock import patch
 from app.services.rss_service import RSSService
 
 
-class RSSServiceCategoryTests(unittest.TestCase):
+class RSSServiceCategoryTests(unittest.IsolatedAsyncioTestCase):
     NOW = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
 
-    @patch("app.services.rss_service.feedparser.parse")
-    def test_returns_all_three_supported_categories(self, parse):
+    @patch("app.services.rss_service.RSSService._fetch_feed")
+    async def test_returns_all_three_supported_categories(self, parse):
         parse.return_value.bozo = False
         parse.return_value.entries = [
             self._entry("OpenAI launches a new AI coding assistant", 11),
@@ -18,7 +18,7 @@ class RSSServiceCategoryTests(unittest.TestCase):
             self._entry("India launches a new tourism campaign", 8),
         ]
 
-        result = RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
+        result = await RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
 
         self.assertEqual(
             [(item["title"], item["category"]) for item in result],
@@ -35,8 +35,8 @@ class RSSServiceCategoryTests(unittest.TestCase):
             ],
         )
 
-    @patch("app.services.rss_service.feedparser.parse")
-    def test_rejects_hardware_news(self, parse):
+    @patch("app.services.rss_service.RSSService._fetch_feed")
+    async def test_rejects_hardware_news(self, parse):
         parse.return_value.bozo = False
         parse.return_value.entries = [
             self._entry("Nvidia launches new AI GPU for data centers", 11),
@@ -44,34 +44,34 @@ class RSSServiceCategoryTests(unittest.TestCase):
             self._entry("New smartphone adds generative AI processor", 9),
         ]
 
-        result = RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
+        result = await RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
 
         self.assertEqual(result, [])
 
-    @patch("app.services.rss_service.feedparser.parse")
-    def test_rejects_hardware_even_with_education_context(self, parse):
+    @patch("app.services.rss_service.RSSService._fetch_feed")
+    async def test_rejects_hardware_even_with_education_context(self, parse):
         parse.return_value.bozo = False
         parse.return_value.entries = [
             self._entry("Schools use AI robots to help students learn", 11),
         ]
 
-        result = RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
+        result = await RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
 
         self.assertEqual(result, [])
 
-    @patch("app.services.rss_service.feedparser.parse")
-    def test_indian_reference_is_not_required_for_general_ai_news(self, parse):
+    @patch("app.services.rss_service.RSSService._fetch_feed")
+    async def test_indian_reference_is_not_required_for_general_ai_news(self, parse):
         parse.return_value.bozo = False
         parse.return_value.entries = [
             self._entry("Anthropic releases an AI safety research report", 11),
         ]
 
-        result = RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
+        result = await RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
 
         self.assertEqual(result[0]["category"], "ai")
 
-    @patch("app.services.rss_service.feedparser.parse")
-    def test_publisher_name_cannot_supply_relevance(self, parse):
+    @patch("app.services.rss_service.RSSService._fetch_feed")
+    async def test_publisher_name_cannot_supply_relevance(self, parse):
         parse.return_value.bozo = False
         parse.return_value.entries = [
             self._entry(
@@ -81,19 +81,19 @@ class RSSServiceCategoryTests(unittest.TestCase):
             ),
         ]
 
-        result = RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
+        result = await RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
 
         self.assertEqual(result, [])
 
-    @patch("app.services.rss_service.feedparser.parse")
-    def test_rejects_stale_and_undated_news(self, parse):
+    @patch("app.services.rss_service.RSSService._fetch_feed")
+    async def test_rejects_stale_and_undated_news(self, parse):
         parse.return_value.bozo = False
         parse.return_value.entries = [
             self._entry("OpenAI publishes new AI research", 11, day=22),
             self._entry("AI changes software development", None),
         ]
 
-        result = RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
+        result = await RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
 
         self.assertEqual(result, [])
 
