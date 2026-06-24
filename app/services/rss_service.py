@@ -15,6 +15,21 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+HTTP_HEADERS = {
+    "User-Agent": os.getenv(
+        "FEED_USER_AGENT",
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/137.0.0.0 Safari/537.36"
+        ),
+    ),
+    "Accept": "application/rss+xml,application/xml,text/xml,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+HTTP_TIMEOUT_SECONDS = 20.0
+HTTP_RETRY_ATTEMPTS = 3
+
 
 # The three feeds reflect the three supported content categories. Content is
 # still validated locally because a search feed can return unrelated stories.
@@ -272,10 +287,28 @@ class RSSService:
         client: httpx.AsyncClient,
         feed_url: str,
     ) -> Any:
-        """Download and parse one RSS feed."""
-        response = await client.get(feed_url)
-        response.raise_for_status()
-        return feedparser.parse(response.content)
+        """Download and parse one RSS feed, retrying transient server errors."""
+        for attempt in range(1, HTTP_RETRY_ATTEMPTS + 1):
+            response = await client.get(feed_url)
+            if response.status_code != httpx.codes.SERVICE_UNAVAILABLE:
+                response.raise_for_status()
+                return feedparser.parse(response.content)
+
+            if attempt == HTTP_RETRY_ATTEMPTS:
+                response.raise_for_status()
+
+            delay = 0.5 * (2 ** (attempt - 1))
+            logger.warning(
+                "Google News returned 503 for %s; retrying in %.1fs "
+                "(attempt %d/%d)",
+                feed_url,
+                delay,
+                attempt,
+                HTTP_RETRY_ATTEMPTS,
+            )
+            await asyncio.sleep(delay)
+
+        raise RuntimeError("RSS feed retry loop ended unexpectedly")
 
     async def get_news(
         self,
@@ -293,16 +326,10 @@ class RSSService:
         rejection_counts: Counter = Counter()
         fetch_size = max(limit * 5, 50)
 
-        timeout = httpx.Timeout(10.0, connect=5.0)
-        user_agent = os.getenv(
-            "FEED_USER_AGENT",
-            "edu-ai-news/1.0 (+RSS reader)",
-        )
-
         async with httpx.AsyncClient(
-            timeout=timeout,
+            headers=HTTP_HEADERS,
+            timeout=HTTP_TIMEOUT_SECONDS,
             follow_redirects=True,
-            headers={"User-Agent": user_agent},
         ) as client:
             feed_results = await asyncio.gather(
                 *(self._fetch_feed(client, feed_url) for feed_url in self.feeds),
@@ -395,16 +422,10 @@ class RSSService:
     async def get_feed_stats(self, sample: int = 5) -> List[Dict[str, Any]]:
         """Return bounded diagnostics for every configured feed."""
         stats: List[Dict[str, Any]] = []
-        timeout = httpx.Timeout(10.0, connect=5.0)
-        user_agent = os.getenv(
-            "FEED_USER_AGENT",
-            "edu-ai-news/1.0 (+RSS reader)",
-        )
-
         async with httpx.AsyncClient(
-            timeout=timeout,
+            headers=HTTP_HEADERS,
+            timeout=HTTP_TIMEOUT_SECONDS,
             follow_redirects=True,
-            headers={"User-Agent": user_agent},
         ) as client:
             feed_results = await asyncio.gather(
                 *(self._fetch_feed(client, feed_url) for feed_url in self.feeds),

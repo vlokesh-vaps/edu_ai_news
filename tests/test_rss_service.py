@@ -1,8 +1,15 @@
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from app.services.rss_service import RSSService
+import httpx
+
+from app.services.rss_service import (
+    HTTP_HEADERS,
+    HTTP_RETRY_ATTEMPTS,
+    HTTP_TIMEOUT_SECONDS,
+    RSSService,
+)
 
 
 class RSSServiceCategoryTests(unittest.IsolatedAsyncioTestCase):
@@ -96,6 +103,39 @@ class RSSServiceCategoryTests(unittest.IsolatedAsyncioTestCase):
         result = await RSSService(feeds=["test"]).get_news(limit=10, now=self.NOW)
 
         self.assertEqual(result, [])
+
+    @patch("app.services.rss_service.asyncio.sleep", new_callable=AsyncMock)
+    async def test_retries_503_before_parsing_feed(self, sleep):
+        request = httpx.Request("GET", "https://news.google.com/rss/test")
+        client = AsyncMock()
+        client.get.side_effect = [
+            httpx.Response(503, request=request),
+            httpx.Response(503, request=request),
+            httpx.Response(
+                200,
+                request=request,
+                content=b"<rss><channel></channel></rss>",
+            ),
+        ]
+
+        feed = await RSSService(feeds=["test"])._fetch_feed(
+            client,
+            str(request.url),
+        )
+
+        self.assertEqual(client.get.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+        self.assertFalse(feed.bozo)
+
+    def test_google_news_request_configuration(self):
+        self.assertIn("Mozilla/5.0", HTTP_HEADERS["User-Agent"])
+        self.assertEqual(
+            HTTP_HEADERS["Accept"],
+            "application/rss+xml,application/xml,text/xml,*/*",
+        )
+        self.assertEqual(HTTP_HEADERS["Accept-Language"], "en-US,en;q=0.9")
+        self.assertEqual(HTTP_TIMEOUT_SECONDS, 20.0)
+        self.assertEqual(HTTP_RETRY_ATTEMPTS, 3)
 
     @staticmethod
     def _entry(hour_title, hour, day=24, source="Test News"):
